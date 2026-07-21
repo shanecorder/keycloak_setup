@@ -245,119 +245,75 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# Step 4: LDAPS truststore setup
+# Step 4: LDAPS truststore setup (PEM bundle — no password required)
+# Keycloak 26.x/Quarkus reads PEM files directly via truststore-paths.
 # ---------------------------------------------------------------------------
 log_step "Step 4: LDAPS truststore"
 
-# Find keytool — Java is installed for Keycloak, keytool is part of JDK
-_keytool=""
-if command -v keytool &>/dev/null; then
-    _keytool="keytool"
-elif [[ -x "/usr/lib/jvm/java-21-openjdk/bin/keytool" ]]; then
-    _keytool="/usr/lib/jvm/java-21-openjdk/bin/keytool"
-else
-    # Try to find any keytool
-    _keytool=$(find /usr/lib/jvm -name keytool -type f 2>/dev/null | head -1 || true)
-fi
-
 KC_INSTALL_DIR="${KC_INSTALL_DIR:-/opt/keycloak}"
-KC_LDAP_TRUSTSTORE_JKS="${KC_LDAP_TRUSTSTORE_JKS:-${KC_INSTALL_DIR}/conf/ldap-truststore.jks}"
-KC_LDAP_TRUSTSTORE_PASSWORD="${KC_LDAP_TRUSTSTORE_PASSWORD:-changeit}"
+KC_LDAP_TRUSTSTORE_PEM="${KC_LDAP_TRUSTSTORE_PEM:-${KC_INSTALL_DIR}/conf/ldap-ad-ca.pem}"
 
 if echo "${AD_SERVER_URL}" | grep -qi "ldaps://"; then
-    if [[ -z "${_keytool}" ]]; then
-        log_warn "keytool not found — cannot create truststore automatically."
-        log_warn "Set up ${KC_LDAP_TRUSTSTORE_JKS} manually and re-run, or use plain ldap:// for testing."
-    else
-        log_info "keytool: ${_keytool}"
-        log_info "Truststore: ${KC_LDAP_TRUSTSTORE_JKS}"
+    log_info "Truststore: ${KC_LDAP_TRUSTSTORE_PEM}"
 
-        # Take the first LDAPS URL from a space-separated list
-        _first_url=$(echo "${AD_SERVER_URL}" | awk '{print $1}')
-        _ad_host=$(echo "${_first_url}" | sed 's|ldaps://||;s|/.*||;s|:.*||')
-        _ad_port=$(echo "${_first_url}" | grep -oP ':\K[0-9]+$' || echo "636")
-        _ad_port="${_ad_port:-636}"
+    # Take the first LDAPS URL from a space-separated list
+    _first_url=$(echo "${AD_SERVER_URL}" | awk '{print $1}')
+    _ad_host=$(echo "${_first_url}" | sed 's|ldaps://||;s|/.*||;s|:.*||')
+    _ad_port=$(echo "${_first_url}" | grep -oP ':\K[0-9]+$' || echo "636")
+    _ad_port="${_ad_port:-636}"
 
-        log_info "Fetching cert chain from ${_ad_host}:${_ad_port} ..."
-        _chain_file="/tmp/hpc-ad-chain-$$.pem"
+    log_info "Fetching cert chain from ${_ad_host}:${_ad_port} ..."
 
-        if [[ "${DRY_RUN}" -eq 0 ]]; then
-            # Fetch full cert chain
-            openssl s_client -connect "${_ad_host}:${_ad_port}" \
-                -showcerts -verify_quiet -verify_return_error \
-                </dev/null 2>/dev/null \
-                | sed -n '/-----BEGIN CERTIFICATE-----/,/-----END CERTIFICATE-----/p' \
-                > "${_chain_file}" || true
+    if [[ "${DRY_RUN}" -eq 0 ]]; then
+        mkdir -p "$(dirname "${KC_LDAP_TRUSTSTORE_PEM}")"
 
-            if [[ ! -s "${_chain_file}" ]]; then
-                log_warn "Could not fetch cert chain from ${_ad_host}:${_ad_port}"
-                log_warn "Check connectivity: openssl s_client -connect ${_ad_host}:${_ad_port}"
-                rm -f "${_chain_file}"
-            else
-                # Split into individual PEM files and import each
-                python3 - "${_chain_file}" "/tmp/hpc-ad-cert-$$" <<'PYEOF'
-import sys, re
-chain = open(sys.argv[1]).read()
-prefix = sys.argv[2]
-certs = re.findall(r'-----BEGIN CERTIFICATE-----.*?-----END CERTIFICATE-----',
-                    chain, re.DOTALL)
-for i, c in enumerate(certs):
-    with open(f"{prefix}-{i}.pem", "w") as f:
-        f.write(c + "\n")
-print(f"Found {len(certs)} certificate(s)")
-PYEOF
+        # Fetch full cert chain and save as PEM bundle (no password, no JKS)
+        openssl s_client -connect "${_ad_host}:${_ad_port}" \
+            -showcerts -verify_quiet -verify_return_error \
+            </dev/null 2>/dev/null \
+            | sed -n '/-----BEGIN CERTIFICATE-----/,/-----END CERTIFICATE-----/p' \
+            > "${KC_LDAP_TRUSTSTORE_PEM}" || true
 
-                mkdir -p "$(dirname "${KC_LDAP_TRUSTSTORE_JKS}")"
-                _imported=0
-                for _cert_file in /tmp/hpc-ad-cert-$$-*.pem; do
-                    [[ -f "${_cert_file}" ]] || continue
-                    _alias="hpc-ad-ca-${_imported}"
-                    "${_keytool}" -importcert \
-                        -keystore "${KC_LDAP_TRUSTSTORE_JKS}" \
-                        -storepass "${KC_LDAP_TRUSTSTORE_PASSWORD}" \
-                        -alias "${_alias}" \
-                        -file "${_cert_file}" \
-                        -noprompt 2>/dev/null \
-                        && log_ok "Imported cert ${_alias}" \
-                        || log_info "Cert ${_alias} already in truststore (or import skipped)"
-                    _imported=$((_imported + 1))
-                    rm -f "${_cert_file}"
-                done
-                rm -f "${_chain_file}"
-                [[ "${_imported}" -gt 0 ]] && log_ok "Truststore ready: ${KC_LDAP_TRUSTSTORE_JKS}"
-            fi
-
-            # Update keycloak.conf with truststore setting (idempotent)
-            KC_CONF="${KC_INSTALL_DIR}/conf/keycloak.conf"
-            if [[ -f "${KC_CONF}" ]]; then
-                if ! grep -q "^truststore-paths=" "${KC_CONF}"; then
-                    echo "" >> "${KC_CONF}"
-                    echo "# LDAPS truststore" >> "${KC_CONF}"
-                    echo "truststore-paths=${KC_LDAP_TRUSTSTORE_JKS}" >> "${KC_CONF}"
-                    log_ok "truststore-paths added to keycloak.conf"
-                    log_info "Restarting Keycloak to apply truststore config ..."
-                    systemctl restart keycloak 2>/dev/null || true
-                    # Poll until KC is healthy (up to 120 s)
-                    _kc_health_url="http://${KC_HOST:-localhost}:${KC_PORT:-8080}/realms/master"
-                    log_info "Waiting for Keycloak to become ready at ${_kc_health_url} ..."
-                    _waited=0
-                    until curl -sf "${_kc_health_url}" -o /dev/null 2>/dev/null; do
-                        if [[ ${_waited} -ge 120 ]]; then
-                            die "Keycloak did not become ready within 120 s after restart (check: journalctl -u keycloak -n 50)"
-                        fi
-                        sleep 3
-                        (( _waited += 3 ))
-                    done
-                    log_ok "Keycloak ready (${_waited}s)"
-                else
-                    log_info "truststore-paths already in keycloak.conf"
-                fi
-            fi
-            write_env_var "KC_LDAP_TRUSTSTORE_JKS"      "${KC_LDAP_TRUSTSTORE_JKS}"      "${CONFIG_FILE}"
-            write_env_var "KC_LDAP_TRUSTSTORE_PASSWORD"  "${KC_LDAP_TRUSTSTORE_PASSWORD}"  "${CONFIG_FILE}"
-        else
-            log_info "[DRY-RUN] Would import certs from ${_ad_host}:${_ad_port} into ${KC_LDAP_TRUSTSTORE_JKS}"
+        if [[ ! -s "${KC_LDAP_TRUSTSTORE_PEM}" ]]; then
+            die "Could not fetch cert chain from ${_ad_host}:${_ad_port}. Check connectivity: openssl s_client -connect ${_ad_host}:${_ad_port}"
         fi
+
+        _cert_count=$(grep -c 'BEGIN CERTIFICATE' "${KC_LDAP_TRUSTSTORE_PEM}" || true)
+        log_ok "Fetched ${_cert_count} certificate(s) → ${KC_LDAP_TRUSTSTORE_PEM}"
+        chown keycloak:keycloak "${KC_LDAP_TRUSTSTORE_PEM}" 2>/dev/null || true
+        chmod 640 "${KC_LDAP_TRUSTSTORE_PEM}" 2>/dev/null || true
+
+        # Update keycloak.conf: add or replace truststore-paths with PEM path
+        KC_CONF="${KC_INSTALL_DIR}/conf/keycloak.conf"
+        if [[ -f "${KC_CONF}" ]]; then
+            if grep -q "^truststore-paths=" "${KC_CONF}"; then
+                # Replace existing entry (may point to old JKS — update to PEM)
+                sed -i "s|^truststore-paths=.*|truststore-paths=${KC_LDAP_TRUSTSTORE_PEM}|" "${KC_CONF}"
+                log_ok "truststore-paths updated in keycloak.conf"
+            else
+                printf '\n# LDAPS truststore (PEM bundle)\ntruststore-paths=%s\n' \
+                    "${KC_LDAP_TRUSTSTORE_PEM}" >> "${KC_CONF}"
+                log_ok "truststore-paths added to keycloak.conf"
+            fi
+            log_info "Restarting Keycloak to apply truststore config ..."
+            systemctl restart keycloak 2>/dev/null || true
+            # Poll until KC is healthy (up to 120 s)
+            _kc_health_url="http://${KC_HOST:-localhost}:${KC_PORT:-8080}/realms/master"
+            log_info "Waiting for Keycloak to become ready at ${_kc_health_url} ..."
+            _waited=0
+            until curl -sf "${_kc_health_url}" -o /dev/null 2>/dev/null; do
+                if [[ ${_waited} -ge 120 ]]; then
+                    die "Keycloak did not become ready within 120 s after restart (check: journalctl -u keycloak -n 50)"
+                fi
+                sleep 3
+                (( _waited += 3 ))
+            done
+            log_ok "Keycloak ready (${_waited}s)"
+        fi
+        write_env_var "KC_LDAP_TRUSTSTORE_PEM" "${KC_LDAP_TRUSTSTORE_PEM}" "${CONFIG_FILE}"
+    else
+        log_info "[DRY-RUN] Would fetch certs from ${_ad_host}:${_ad_port} → ${KC_LDAP_TRUSTSTORE_PEM}"
+        log_info "[DRY-RUN] Would update truststore-paths in keycloak.conf"
     fi
 else
     log_warn "AD_SERVER_URL uses ldap:// (plaintext) — skipping truststore setup"
