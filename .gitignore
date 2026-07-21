@@ -1,0 +1,17 @@
+# OS
+.DS_Store
+Thumbs.db
+
+# Editors
+.vscode/
+*.swp
+*~
+
+# Secrets — do NOT commit a populated config.env
+# Copy config.env to config.env.local and fill in real values there
+config.env.local
+
+# Keycloak runtime artifacts (if running locally)
+*.jks
+*.p12
+*.pem
