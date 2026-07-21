@@ -252,6 +252,26 @@ else:
         raise SystemExit(f'ERROR: create realm HTTP {st}: {resp}')
     print(f'[KC] Realm {realm!r} created')
 
+# ── Required Actions: disable default prompts for LDAP-federated users ──────
+# AD users have read-only profiles — prompting them to verify/update profile
+# or verify email creates an unbreakable loop (form shows, submit loops back).
+# LDAP data is trusted; disable all three as realm-level defaults.
+print('[KC] Configuring required actions for LDAP realm...')
+st, req_actions = _http('GET', f'/admin/realms/{realm}/authentication/required-actions', token=token)
+no_default = {'VERIFY_PROFILE', 'UPDATE_PROFILE', 'VERIFY_EMAIL'}
+for action in (req_actions or []):
+    alias = action.get('alias', '')
+    if alias in no_default:
+        if action.get('defaultAction', False):
+            action['defaultAction'] = False
+            st2, _ = _http('PUT',
+                f'/admin/realms/{realm}/authentication/required-actions/{alias}',
+                action, token=token)
+            print(f'[KC]   {alias}: defaultAction → false (HTTP {st2})')
+        else:
+            print(f'[KC]   {alias}: defaultAction already false — OK')
+print('[KC] Required actions configured')
+
 for rname, rdesc in [
     ('hpc-user',  'Baseline compute access — all authorized HPC cluster users.'),
     ('hpc-admin', 'Administrative access to HPC infrastructure management.'),
