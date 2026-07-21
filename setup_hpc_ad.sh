@@ -604,9 +604,9 @@ print('[AD] Adding POSIX attribute mappers ...')
 
 for ldap_attr, model_attr in [
     ('uidNumber',     'uidNumber'),
+    ('gidNumber',     'gidNumber'),
     ('homeDirectory', 'homeDirectory'),
     ('loginShell',    'loginShell'),
-    ('gidNumber',     'gidNumber'),
 ]:
     add_mapper(f'{ldap_attr}-ldap-mapper', 'user-attribute-ldap-mapper', {
         'ldap.attribute':              [ldap_attr],
@@ -615,19 +615,6 @@ for ldap_attr, model_attr in [
         'always.read.value.from.ldap': ['true'],
         'read.only':                   ['true'],
     })
-
-# UPG pattern fallback: if AD doesn't have gidNumber, map from uidNumber.
-# This creates gidNumber = uidNumber (User Private Group convention).
-# Only add this if gidNumber LDAP attr is not populated in your AD schema.
-# Comment out the UPG mapper below if your AD has real gidNumber values.
-add_mapper('gidNumber-UPG-mapper', 'user-attribute-ldap-mapper', {
-    'ldap.attribute':              ['uidNumber'],   # reads uidNumber from LDAP
-    'user.model.attribute':        ['gidNumber'],   # stores as gidNumber in KC
-    'is.mandatory.in.ldap':        ['false'],
-    'always.read.value.from.ldap': ['true'],
-    'read.only':                   ['true'],
-})
-print('[AD]   NOTE: UPG mapper sets gidNumber=uidNumber. Remove if AD has real gidNumber.')
 
 # ---------- Step 5c: Group LDAP mapper ----------
 print('[AD] Adding group LDAP mapper ...')
