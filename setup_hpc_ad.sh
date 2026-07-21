@@ -419,6 +419,45 @@ sys.stdout.flush()
 token = get_token()
 print(' OK')
 
+# ---------- Pre-flight: Test LDAP connection & bind ----------
+print('[AD] Testing LDAP connection ...')
+_test_base = {
+    'connectionUrl':     connection_url,
+    'bindDn':            bind_dn,
+    'bindCredential':    bind_pw,
+    'useTruststoreSpi':  'always',
+    'connectionTimeout': '5000',
+    'startTls':          'false',
+}
+st_c, resp_c = _http('POST', f'/admin/realms/{realm}/testLDAPConnection',
+                     {**_test_base, 'action': 'testConnection'}, token=token)
+if st_c == 204:
+    print('[AD]   Connection OK')
+    st_a, resp_a = _http('POST', f'/admin/realms/{realm}/testLDAPConnection',
+                         {**_test_base, 'action': 'testAuthentication'}, token=token)
+    if st_a == 204:
+        print('[AD]   Bind (authentication) OK')
+    else:
+        _err = (resp_a or {}).get('errorMessage', str(resp_a))
+        raise SystemExit(
+            f'ERROR: LDAP bind test failed (HTTP {st_a}): {_err}\n'
+            f'       Check AD_BIND_DN and AD_BIND_PASSWORD in config.env.\n'
+            f'       Bind DN used: {bind_dn}'
+        )
+elif st_c == 400:
+    _err = (resp_c or {}).get('errorMessage', str(resp_c))
+    raise SystemExit(
+        f'ERROR: LDAP connection test failed (HTTP {st_c}): {_err}\n'
+        f'       Connection URL: {connection_url}\n'
+        f'       Checklist:\n'
+        f'         1. Network/firewall: nc -zv {connection_url.split("//")[-1]} 636\n'
+        f'         2. Cert chain:       openssl s_client -connect {connection_url.split("//")[-1]}:636\n'
+        f'         3. KC truststore:    grep truststore-paths /opt/keycloak/conf/keycloak.conf\n'
+        f'         4. KC logs:          journalctl -u keycloak -n 80 --no-pager | grep -i ldap'
+    )
+else:
+    print(f'[AD]   WARN: testLDAPConnection returned HTTP {st_c} — continuing anyway')
+
 # ---------- Create or update LDAP user-storage provider ----------
 # Note: the ?type= query filter is unreliable in KC 26.x — fetch all
 # components and filter by name + providerId in Python.
@@ -647,6 +686,7 @@ else:
     print(f'[AD] WARN: Sync returned HTTP {st} — check KC logs')
     if sync_resp:
         print(f'[AD]       Response: {json.dumps(sync_resp)[:300]}')
+    print(f'[AD]       Run: journalctl -u keycloak -n 80 --no-pager | grep -iE "ldap|sync|error"')
 
 print('')
 print('[AD] ═══════════════════════════════════════════════')
