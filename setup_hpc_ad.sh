@@ -458,6 +458,18 @@ elif st_c == 400:
 else:
     print(f'[AD]   WARN: testLDAPConnection returned HTTP {st_c} — continuing anyway')
 
+# ---------- Resolve realm UUID (required as parentId in KC 26.x) ----------
+# KC 26.x sync endpoint resolves the provider by realm UUID internally.
+# Using the realm name string as parentId causes silent HTTP 400 on sync.
+st_r, realm_rep = _http('GET', f'/admin/realms/{realm}', token=token)
+if st_r != 200 or not realm_rep:
+    raise SystemExit(
+        f'ERROR: realm {realm!r} not found (HTTP {st_r}).\n'
+        f'       Run new_configure_hpc.sh first to create the realm.'
+    )
+realm_uuid = realm_rep.get('id', realm)
+print(f'[AD] Realm UUID: {realm_uuid}')
+
 # ---------- Create or update LDAP user-storage provider ----------
 # Note: the ?type= query filter is unreliable in KC 26.x — fetch all
 # components and filter by name + providerId in Python.
@@ -472,7 +484,7 @@ ldap_payload = {
     'name': provider_name,
     'providerId': 'ldap',
     'providerType': 'org.keycloak.storage.UserStorageProvider',
-    'parentId': realm,
+    'parentId': realm_uuid,   # must be UUID, not realm name, for sync to work in KC 26.x
     'config': {
         'vendor':                    ['ad'],
         'connectionUrl':             [connection_url],
@@ -503,12 +515,15 @@ if custom_filter.strip():
     ldap_payload['config']['customUserSearchFilter'] = [custom_filter.strip()]
 
 if existing_id:
-    ldap_payload['id'] = existing_id
-    st, _ = _http('PUT', f'/admin/realms/{realm}/components/{existing_id}',
-                  ldap_payload, token=token)
-    print(f'[AD] LDAP provider updated (id={existing_id})')
-    provider_id = existing_id
-else:
+    # Delete the existing provider so it is recreated clean.
+    # A provider in an error state (e.g. wrong parentId from a previous run)
+    # will keep failing sync even after a PUT update.
+    # All mappers are recreated by the steps below, so nothing is lost.
+    print(f'[AD] Removing existing provider (id={existing_id}) for clean recreation ...')
+    _http('DELETE', f'/admin/realms/{realm}/components/{existing_id}', token=token)
+    existing_id = None
+
+if not existing_id:
     st, _ = _http('POST', f'/admin/realms/{realm}/components', ldap_payload, token=token)
     if st not in (201, 409):
         raise SystemExit(f'ERROR: create LDAP provider: HTTP {st}')
