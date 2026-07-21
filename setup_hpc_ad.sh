@@ -420,11 +420,12 @@ token = get_token()
 print(' OK')
 
 # ---------- Create or update LDAP user-storage provider ----------
-st, comps = _http('GET',
-    f'/admin/realms/{realm}/components?type=org.keycloak.storage.UserStorageProvider',
-    token=token)
+# Note: the ?type= query filter is unreliable in KC 26.x — fetch all
+# components and filter by name + providerId in Python.
+st, comps = _http('GET', f'/admin/realms/{realm}/components', token=token)
 existing_id = next(
-    (c['id'] for c in (comps or []) if c.get('name') == provider_name), None)
+    (c['id'] for c in (comps or [])
+     if c.get('name') == provider_name and c.get('providerId') == 'ldap'), None)
 
 use_tls = connection_url.lower().startswith('ldaps')
 
@@ -472,16 +473,17 @@ else:
     st, _ = _http('POST', f'/admin/realms/{realm}/components', ldap_payload, token=token)
     if st not in (201, 409):
         raise SystemExit(f'ERROR: create LDAP provider: HTTP {st}')
-    st, comps = _http('GET',
-        f'/admin/realms/{realm}/components?type=org.keycloak.storage.UserStorageProvider',
-        token=token)
-    provider_id = next((c['id'] for c in (comps or []) if c['name'] == provider_name), None)
+    st, comps = _http('GET', f'/admin/realms/{realm}/components', token=token)
+    provider_id = next(
+        (c['id'] for c in (comps or [])
+         if c.get('name') == provider_name and c.get('providerId') == 'ldap'), None)
     if not provider_id:
+        seen = [(c.get('name'), c.get('providerId')) for c in (comps or [])]
         raise SystemExit(
             f'ERROR: LDAP provider {provider_name!r} not found after creation.\n'
-            f'       GET returned HTTP {st}, {len(comps or [])} component(s).\n'
-            f'       Names seen: {[c.get("name") for c in (comps or [])]}\n'
-            f'       Try running new_configure_hpc.sh first, then re-run this script.'
+            f'       GET /components returned HTTP {st}, {len(comps or [])} component(s).\n'
+            f'       (name, providerId) seen: {seen}\n'
+            f'       Check KC logs: journalctl -u keycloak -n 50'
         )
     print(f'[AD] LDAP provider created (id={provider_id})')
 
