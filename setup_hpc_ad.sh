@@ -337,7 +337,18 @@ PYEOF
                     log_ok "truststore-paths added to keycloak.conf"
                     log_info "Restarting Keycloak to apply truststore config ..."
                     systemctl restart keycloak 2>/dev/null || true
-                    sleep 10  # brief wait before API calls
+                    # Poll until KC is healthy (up to 120 s)
+                    _kc_health_url="http://${KC_HOST:-localhost}:${KC_PORT:-8080}/realms/master"
+                    log_info "Waiting for Keycloak to become ready at ${_kc_health_url} ..."
+                    _waited=0
+                    until curl -sf "${_kc_health_url}" -o /dev/null 2>/dev/null; do
+                        if [[ ${_waited} -ge 120 ]]; then
+                            die "Keycloak did not become ready within 120 s after restart (check: journalctl -u keycloak -n 50)"
+                        fi
+                        sleep 3
+                        (( _waited += 3 ))
+                    done
+                    log_ok "Keycloak ready (${_waited}s)"
                 else
                     log_info "truststore-paths already in keycloak.conf"
                 fi
