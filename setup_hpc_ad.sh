@@ -475,7 +475,14 @@ else:
     st, comps = _http('GET',
         f'/admin/realms/{realm}/components?type=org.keycloak.storage.UserStorageProvider',
         token=token)
-    provider_id = next(c['id'] for c in comps if c['name'] == provider_name)
+    provider_id = next((c['id'] for c in (comps or []) if c['name'] == provider_name), None)
+    if not provider_id:
+        raise SystemExit(
+            f'ERROR: LDAP provider {provider_name!r} not found after creation.\n'
+            f'       GET returned HTTP {st}, {len(comps or [])} component(s).\n'
+            f'       Names seen: {[c.get("name") for c in (comps or [])]}\n'
+            f'       Try running new_configure_hpc.sh first, then re-run this script.'
+        )
     print(f'[AD] LDAP provider created (id={provider_id})')
 
 # ---------- Helper: add/update mapper ----------
